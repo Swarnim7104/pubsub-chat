@@ -4,7 +4,13 @@ import logging
 import sys
 import os
 from datetime import datetime
-from collections import defaultdict
+from collections import defaultdict, deque
+from rich.console import Console
+from rich.table import Table
+from rich.layout import Layout
+from rich.panel import Panel
+from rich.live import Live
+import time
 
 # Load configuration
 def load_config():
@@ -35,6 +41,7 @@ class MessageStats:
         self.total_messages = 0
         self.messages_by_user = defaultdict(int)
         self.start_time = datetime.now()
+        self.topic = None
         
     def update(self, user):
         self.total_messages += 1
@@ -50,17 +57,61 @@ class MessageStats:
             "top_users": dict(sorted(self.messages_by_user.items(), 
                                    key=lambda x: x[1], reverse=True)[:5])
         }
+    
+
+def create_layout() -> Layout:
+    layout = Layout(name="root")
+
+    layout.split(
+        Layout(name="header", size=3),
+        Layout(ratio=1, name="main"),
+        Layout(size=5, name="footer"),
+    )
+
+    layout["main"].split_row(Layout(name="side"), Layout(name="body", ratio=2))
+    return layout
+
+def generate_dashboard(stats: MessageStats, message_queue: deque) -> Panel:
+    stats_data = stats.get_stats()
+
+    # Create a table for statistics
+    stats_table = Table(title="[bold cyan]Live Statistics[/bold cyan]", expand=True)
+    stats_table.add_column("Metric", style="green")
+    stats_table.add_column("Value", style="magenta")
+    stats_table.add_row("Total Messages", str(stats_data['total_messages']))
+    stats_table.add_row("Messages/Min", f"{stats_data['messages_per_minute']:.2f}")
+    stats_table.add_row("Active Users", str(stats_data['active_users']))
+    stats_table.add_row("Top User", str(stats_data['top_users']))
+
+    message_list = "\n".join(message_queue)
+    message_panel = Panel(
+        message_list,
+        title="[bold green]Live Message Feed[/bold green]",
+        border_style="green",
+        expand=True
+    )
+
+    dashboard_panel = Panel(
+        stats_table,
+        title="[bold yellow]Real-time Messaging Dashboard[/bold yellow]",
+        subtitle=f"[bold blue]Subscribed to: {stats.topic}[/bold blue]" # We will add topic to stats
+    )
+
+    main_layout = Layout()
+    main_layout.split_column(dashboard_panel, message_panel)
+    return main_layout
 
 def main():
     context = None
     socket = None
     stats = MessageStats()
-    
+
+    message_queue = deque(maxlen=10)
+
     try:
         context = zmq.Context()
         socket = context.socket(zmq.SUB)
-        
-        # Connect using config
+
         host = config['network']['host']
         port = config['network']['port']
         socket.connect(f"tcp://{host}:{port}")
@@ -70,63 +121,65 @@ def main():
         if not topic:
             logger.error("Channel cannot be empty")
             sys.exit(1)
-            
+
+
+        stats.topic = topic
         socket.setsockopt_string(zmq.SUBSCRIBE, topic + " ")
         logger.info(f"Subscribed to channel '{topic}'")
-        
-        print(f"\n📥 Subscribed to '{topic}'. Listening for messages...")
-        print("📊 Press Ctrl+C to see statistics and exit.\n")
 
-        log_file = f"{topic}_log.txt"
-        with open(log_file, "a") as log:
-            log.write(f"\n--- Session started at {datetime.now()} ---\n")
-            
-            while True:
-                try:
-                    full_msg = socket.recv_string(zmq.NOBLOCK)
-                    _, msg = full_msg.split(' ', 1)
-                    
-                    # Extract user from message format: [timestamp] user: content
+
+        with Live(generate_dashboard(stats, message_queue), screen=True, auto_refresh=False) as live:
+            log_file = f"{topic}_log.txt"
+            with open(log_file, "a") as log:
+                log.write(f"\n--- Session started at {datetime.now()} ---\n")
+
+                while True:
                     try:
-                        user_part = msg.split('] ')[1].split(': ')[0]
-                        stats.update(user_part)
-                    except:
-                        stats.update("unknown")
-                    
-                    print(f">> {msg}")
-                    log.write(msg + "\n")
-                    log.flush()
-                    
-                except zmq.Again:
-                    # No message available
-                    continue
-                except Exception as e:
-                    logger.error(f"Error processing message: {e}")
-                    
+                        full_msg = socket.recv_string(zmq.NOBLOCK)
+                        _, msg = full_msg.split(' ', 1)
+
+
+                        try:
+                            user_part = msg.split('] ')[1].split(': ')[0]
+                            stats.update(user_part)
+                        except:
+                            stats.update("unknown")
+
+
+                        message_queue.append(msg)
+
+
+                        log.write(msg + "\n")
+                        log.flush()
+
+
+                        live.update(generate_dashboard(stats, message_queue), refresh=True)
+
+                    except zmq.Again:
+
+                        time.sleep(0.1)
+
+                        live.update(generate_dashboard(stats, message_queue), refresh=True)
+                    except Exception as e:
+                        logger.error(f"Error processing message: {e}")
+
     except KeyboardInterrupt:
         logger.info("Received interrupt signal")
     except Exception as e:
         logger.error(f"Fatal error: {e}")
     finally:
-        # Show statistics
+
+        print("\n--- Final Session Statistics ---")
         if stats.total_messages > 0:
             stats_data = stats.get_stats()
-            print(f"\n📊 Session Statistics:")
             print(f"   Total messages: {stats_data['total_messages']}")
             print(f"   Runtime: {stats_data['runtime_seconds']:.1f} seconds")
-            print(f"   Rate: {stats_data['messages_per_minute']:.1f} msg/min")
-            print(f"   Active users: {stats_data['active_users']}")
-            if stats_data['top_users']:
-                print(f"   Top users: {stats_data['top_users']}")
-        
-        # Cleanup
+            # ... and so on
+
         if socket:
             socket.close()
-            logger.info("Socket closed")
         if context:
             context.term()
-            logger.info("Context terminated")
-        
         print("\n❌ Subscriber exiting.")
 
 if __name__ == "__main__":
