@@ -11,6 +11,9 @@ from rich.layout import Layout
 from rich.panel import Panel
 from rich.live import Live
 import time
+import threading
+import queue
+# ... keep existing imports like zmq, json, logging, etc.
 
 # Load configuration
 def load_config():
@@ -101,6 +104,20 @@ def generate_dashboard(stats: MessageStats, message_queue: deque) -> Panel:
     main_layout.split_column(dashboard_panel, message_panel)
     return main_layout
 
+def network_worker(socket, msg_queue, stop_event):
+    """Background thread to handle blocking network I/O"""
+    while not stop_event.is_set():
+        try:
+            # We can now use blocking I/O (or a timeout) because we are in a thread!
+            # Using a timeout allows us to check stop_event periodically.
+            if socket.poll(timeout=100): 
+                full_msg = socket.recv_string()
+                msg_queue.put(full_msg) # Thread-safe push
+        except zmq.ContextTerminated:
+            break
+        except Exception as e:
+            logger.error(f"Network thread error: {e}")
+
 def main():
     context = None
     socket = None
@@ -128,47 +145,58 @@ def main():
         logger.info(f"Subscribed to channel '{topic}'")
 
 
-        with Live(generate_dashboard(stats, message_queue), screen=True, auto_refresh=False) as live:
+        msg_queue = queue.Queue()
+    stop_event = threading.Event()
+    
+    # 2. Start the Network Thread
+    net_thread = threading.Thread(
+        target=network_worker, 
+        args=(socket, msg_queue, stop_event),
+        daemon=True # Ensures thread dies if main program crashes
+    )
+    net_thread.start()
+    logger.info("Started background network thread")
+
+    # 3. The UI Loop (Now purely for rendering)
+    try:
+        with Live(generate_dashboard(stats, message_queue), screen=True, refresh_per_second=10) as live:
             log_file = f"{topic}_log.txt"
             with open(log_file, "a") as log:
                 log.write(f"\n--- Session started at {datetime.now()} ---\n")
-
+                
                 while True:
+                    # NON-BLOCKING CHECK: Drain the queue of all pending messages
                     try:
-                        full_msg = socket.recv_string(zmq.NOBLOCK)
-                        _, msg = full_msg.split(' ', 1)
-
-
-                        try:
-                            user_part = msg.split('] ')[1].split(': ')[0]
-                            stats.update(user_part)
-                        except:
-                            stats.update("unknown")
-
-
-                        message_queue.append(msg)
-
-
-                        log.write(msg + "\n")
-                        log.flush()
-
-
-                        live.update(generate_dashboard(stats, message_queue), refresh=True)
-
-                    except zmq.Again:
-
-                        time.sleep(0.1)
-
-                        live.update(generate_dashboard(stats, message_queue), refresh=True)
-                    except Exception as e:
-                        logger.error(f"Error processing message: {e}")
+                        while True: 
+                            full_msg = msg_queue.get_nowait() # Get from thread!
+                            
+                            # --- EXISTING LOGIC STARTS HERE ---
+                            _, msg = full_msg.split(' ', 1)
+                            try:
+                                user_part = msg.split('] ')[1].split(': ')[0]
+                                stats.update(user_part)
+                            except:
+                                stats.update("unknown")
+                            
+                            message_queue.append(msg)
+                            log.write(msg + "\n")
+                            # --- EXISTING LOGIC ENDS HERE ---
+                            
+                    except queue.Empty:
+                        pass # No new messages, just continue to render
+                    
+                    # Update UI
+                    live.update(generate_dashboard(stats, message_queue))
+                    time.sleep(0.05) # Small sleep to prevent 100% CPU usage
 
     except KeyboardInterrupt:
-        logger.info("Received interrupt signal")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
+        logger.info("Stopping...")
     finally:
-
+        # Cleanup Thread
+        stop_event.set()
+        net_thread.join(timeout=1.0)
+        
+        # ... (Keep your existing cleanup code for socket/context below)
         print("\n--- Final Session Statistics ---")
         if stats.total_messages > 0:
             stats_data = stats.get_stats()
