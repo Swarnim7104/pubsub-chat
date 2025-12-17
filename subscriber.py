@@ -13,9 +13,7 @@ from rich.live import Live
 import time
 import threading
 import queue
-# ... keep existing imports like zmq, json, logging, etc.
 
-# Load configuration
 def load_config():
     try:
         with open('config.json', 'r') as f:
@@ -28,7 +26,7 @@ def load_config():
 
 config = load_config()
 
-# Setup logging
+
 logging.basicConfig(
     level=getattr(logging, config['logging']['level']),
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -77,7 +75,7 @@ def create_layout() -> Layout:
 def generate_dashboard(stats: MessageStats, message_queue: deque) -> Panel:
     stats_data = stats.get_stats()
 
-    # Create a table for statistics
+
     stats_table = Table(title="[bold cyan]Live Statistics[/bold cyan]", expand=True)
     stats_table.add_column("Metric", style="green")
     stats_table.add_column("Value", style="magenta")
@@ -97,7 +95,7 @@ def generate_dashboard(stats: MessageStats, message_queue: deque) -> Panel:
     dashboard_panel = Panel(
         stats_table,
         title="[bold yellow]Real-time Messaging Dashboard[/bold yellow]",
-        subtitle=f"[bold blue]Subscribed to: {stats.topic}[/bold blue]" # We will add topic to stats
+        subtitle=f"[bold blue]Subscribed to: {stats.topic}[/bold blue]" 
     )
 
     main_layout = Layout()
@@ -108,11 +106,10 @@ def network_worker(socket, msg_queue, stop_event):
     """Background thread to handle blocking network I/O"""
     while not stop_event.is_set():
         try:
-            # We can now use blocking I/O (or a timeout) because we are in a thread!
-            # Using a timeout allows us to check stop_event periodically.
+            
             if socket.poll(timeout=100): 
                 full_msg = socket.recv_string()
-                msg_queue.put(full_msg) # Thread-safe push
+                msg_queue.put(full_msg) 
         except zmq.ContextTerminated:
             break
         except Exception as e:
@@ -148,16 +145,14 @@ def main():
         msg_queue = queue.Queue()
     stop_event = threading.Event()
     
-    # 2. Start the Network Thread
     net_thread = threading.Thread(
         target=network_worker, 
         args=(socket, msg_queue, stop_event),
-        daemon=True # Ensures thread dies if main program crashes
+        daemon=True 
     )
     net_thread.start()
     logger.info("Started background network thread")
 
-    # 3. The UI Loop (Now purely for rendering)
     try:
         with Live(generate_dashboard(stats, message_queue), screen=True, refresh_per_second=10) as live:
             log_file = f"{topic}_log.txt"
@@ -165,12 +160,10 @@ def main():
                 log.write(f"\n--- Session started at {datetime.now()} ---\n")
                 
                 while True:
-                    # NON-BLOCKING CHECK: Drain the queue of all pending messages
                     try:
                         while True: 
-                            full_msg = msg_queue.get_nowait() # Get from thread!
+                            full_msg = msg_queue.get_nowait() 
                             
-                            # --- EXISTING LOGIC STARTS HERE ---
                             _, msg = full_msg.split(' ', 1)
                             try:
                                 user_part = msg.split('] ')[1].split(': ')[0]
@@ -180,29 +173,24 @@ def main():
                             
                             message_queue.append(msg)
                             log.write(msg + "\n")
-                            # --- EXISTING LOGIC ENDS HERE ---
                             
                     except queue.Empty:
-                        pass # No new messages, just continue to render
+                        pass 
                     
-                    # Update UI
                     live.update(generate_dashboard(stats, message_queue))
-                    time.sleep(0.05) # Small sleep to prevent 100% CPU usage
+                    time.sleep(0.05)
 
     except KeyboardInterrupt:
         logger.info("Stopping...")
     finally:
-        # Cleanup Thread
         stop_event.set()
         net_thread.join(timeout=1.0)
         
-        # ... (Keep your existing cleanup code for socket/context below)
         print("\n--- Final Session Statistics ---")
         if stats.total_messages > 0:
             stats_data = stats.get_stats()
             print(f"   Total messages: {stats_data['total_messages']}")
             print(f"   Runtime: {stats_data['runtime_seconds']:.1f} seconds")
-            # ... and so on
 
         if socket:
             socket.close()
